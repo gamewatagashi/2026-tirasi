@@ -79,6 +79,18 @@ def pref_suffix(pref_name: str) -> str:
     if pref_name == '北海道':           return ''
     return '県'
 
+def _xml_escape(text: str) -> str:
+    """Escape characters that are not valid as-is inside a <w:t> text node.
+    Without this, any '&', '<', or '>' in a university name or OC schedule
+    string (e.g. 'AO&推薦', 'A<B学部') produces malformed XML and Word refuses
+    to open the resulting .docx."""
+    if text is None:
+        return ''
+    return (str(text)
+            .replace('&', '&amp;')
+            .replace('<', '&lt;')
+            .replace('>', '&gt;'))
+
 def replace_title(xml: str, tmpl_key: int, pref_name: str, main_univ: str) -> str:
     """
     Title paragraphs are structured as split runs:
@@ -119,14 +131,14 @@ def replace_title(xml: str, tmpl_key: int, pref_name: str, main_univ: str) -> st
 
         if is_univ_para and univ_replaced < 2:
             # Replace first occurrence of old_ph in this paragraph with main_univ
-            new_body = body.replace(f'>{old_ph}<', f'>{main_univ}<', 1)
+            new_body = body.replace(f'>{old_ph}<', f'>{_xml_escape(main_univ)}<', 1)
             univ_replaced += 1
             return open_tag + new_body + close_tag
 
         if is_pref_para and pref_replaced < 2:
             # Replace first occurrence of old_ph with pref_name
             # Replace '県の'/'府の' etc with correct suffix
-            new_body = body.replace(f'>{old_ph}<', f'>{pref_name}<', 1)
+            new_body = body.replace(f'>{old_ph}<', f'>{_xml_escape(pref_name)}<', 1)
             for old_sfx in ['県の', '府の', '都の', 'の']:
                 if f'>{old_sfx}<' in new_body:
                     new_body = new_body.replace(f'>{old_sfx}<', f'>{suffix}の<', 1)
@@ -156,7 +168,7 @@ def replace_cell_content(tc_xml: str, univ_name: str, schedule: str) -> str:
         wts = list(wt_pattern.finditer(p))
         if not wts:
             continue
-        new_p = p[:wts[0].start()] + f'<w:t>{text}</w:t>'
+        new_p = p[:wts[0].start()] + f'<w:t xml:space="preserve">{_xml_escape(text)}</w:t>'
         rest   = wt_pattern.sub('<w:t></w:t>', p[wts[0].end():])
         new_p += rest
         new_tc = new_tc[:paragraphs[pidx].start()] + new_p + new_tc[paragraphs[pidx].end():]
