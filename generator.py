@@ -246,18 +246,49 @@ def generate_chirashi(pref_num, pref_name, universities, campus_image_path, outp
 
 # ── PDF helpers ───────────────────────────────────────────────
 def docx_to_pdf(docx_path: str, pdf_path: str) -> str:
-    import subprocess
+    import subprocess, uuid
+
     out_dir = os.path.dirname(os.path.abspath(pdf_path))
-    subprocess.run(['soffice', '--headless', '--convert-to', 'pdf',
-                    '--outdir', out_dir, docx_path], capture_output=True)
+    os.makedirs(out_dir, exist_ok=True)
+
+    # Each call gets its own LibreOffice user profile. Reusing the default
+    # profile across back-to-back headless conversions (as happens in batch
+    # generation) can leave a stale lock file behind and cause the next
+    # conversion to silently fail to produce an output file.
+    profile_dir = os.path.join(tempfile.gettempdir(), f'lo_profile_{uuid.uuid4().hex}')
+
+    cmd = [
+        'soffice', '--headless', '--norestore',
+        f'-env:UserInstallation=file://{profile_dir}',
+        '--convert-to', 'pdf', '--outdir', out_dir, docx_path,
+    ]
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+    except subprocess.TimeoutExpired as e:
+        raise RuntimeError(f"LibreOfficeの変換がタイムアウトしました（{docx_path}）") from e
+    finally:
+        import shutil
+        shutil.rmtree(profile_dir, ignore_errors=True)
+
     base     = os.path.splitext(os.path.basename(docx_path))[0]
     expected = os.path.join(out_dir, base + '.pdf')
-    if os.path.exists(expected) and os.path.abspath(expected) != os.path.abspath(pdf_path):
-        os.rename(expected, pdf_path)
+
+    if not os.path.exists(expected):
+        stderr = (result.stderr or '').strip()[-800:]
+        raise RuntimeError(
+            f"PDF変換に失敗しました（{os.path.basename(docx_path)}）。"
+            f"LibreOfficeがインストールされているか確認してください。詳細: {stderr}"
+        )
+
+    if os.path.abspath(expected) != os.path.abspath(pdf_path):
+        os.replace(expected, pdf_path)
     return pdf_path
 
 def merge_pdfs(front_pdf: str, back_pdf: str, output_pdf: str) -> str:
     from pypdf import PdfWriter, PdfReader
+    for path in [front_pdf, back_pdf]:
+        if not os.path.exists(path):
+            raise FileNotFoundError(f"PDFファイルが見つかりません: {path}")
     writer = PdfWriter()
     for path in [front_pdf, back_pdf]:
         for page in PdfReader(path).pages:
@@ -298,15 +329,17 @@ def generate_batch_zip(jobs: list[dict], do_pdf: bool, do_back: bool,
                     warnings.append(f"{base_name}: 写真が見つからず既定の画像のままです")
 
                 if do_pdf:
-                    pdf_front = os.path.join(tmp, f'{base_name}_front.pdf')
-                    docx_to_pdf(docx_out, pdf_front)
-                    if do_back and back_pdf_path and os.path.exists(back_pdf_path):
-                        pdf_final = os.path.join(tmp, f'{base_name}.pdf')
-                        merge_pdfs(pdf_front, back_pdf_path, pdf_final)
-                    else:
-                        pdf_final = pdf_front
-                    if os.path.exists(pdf_final):
+                    try:
+                        pdf_front = os.path.join(tmp, f'{base_name}_front.pdf')
+                        docx_to_pdf(docx_out, pdf_front)
+                        if do_back and back_pdf_path and os.path.exists(back_pdf_path):
+                            pdf_final = os.path.join(tmp, f'{base_name}.pdf')
+                            merge_pdfs(pdf_front, back_pdf_path, pdf_final)
+                        else:
+                            pdf_final = pdf_front
                         zf.write(pdf_final, f'{base_name}.pdf')
+                    except Exception as e:
+                        warnings.append(f"{base_name}: PDF変換エラー ({e})。Wordファイルのみ同梱しました")
 
     buf.seek(0)
     return buf.getvalue(), warnings
